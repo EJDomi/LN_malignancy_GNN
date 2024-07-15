@@ -5,17 +5,17 @@ import torch.nn.functional as F
 import torchvision
 import torchmetrics
 
-import lightning as L
+import pytorch_lightning as L
 
-import LN_project_repo.pytorch.extractor_networks as en
-import LN_project_repo.pytorch.gnn_networks as graphs
-
+import LN_malignancy_GNN.pytorch.extractor_networks as en
+import LN_malignancy_GNN.pytorch.gnn_networks as graphs
 
 
 class Classify(nn.Module):
-    def __init__(self, n_classes):
+    def __init__(self, in_channels, n_classes):
         super().__init__()
-        self.classify = nn.LazyLinear(n_classes)
+        self.classify = nn.Linear(in_channels, n_classes)
+        #self.classify = nn.LazyLinear(n_classes)
 
 
     def forward(self, x, clinical=None):
@@ -37,98 +37,107 @@ class CNN_GNN(L.LightningModule):
         super().__init__()
         self.config = config
         self.learning_rate = self.config['learning_rate']
-        self.extractor = getattr(en, self.config['extractor_name'])(n_classes=self.config['n_extracted_channels'], in_channels=self.config['n_in_channels'], dropout=self.config['dropout'])
-        self.gnn = getattr(graphs, self.config['model_name'])(in_channels=self.config['n_extracted_channels'], hidden_channels=self.config['n_hidden_channels'], n_classes=self.config['n_hidden_channels'], edge_dim=self.config['edge_dim'], dropout=self.config['dropout'])
+        self.extractor = getattr(en, self.config['extractor_name'])(in_channels=self.config['n_in_channels'], dropout=self.config['dropout'])
+        self.gnn = getattr(graphs, self.config['model_name'])(self.config['extractor_channels'], hidden_channels=self.config['n_hidden_channels'], n_classes=self.config['n_hidden_channels'], edge_dim=self.config['edge_dim'], dropout=self.config['dropout'])
  
-        self.classify = Classify(n_classes=self.config['n_classes'])
+        self.classify = Classify(in_channels=self.config['n_hidden_channels'], n_classes=self.config['n_classes'])
 
         self.loss_fn = nn.BCEWithLogitsLoss()
+        self.val_loss_fn = nn.BCEWithLogitsLoss()
+        self.test_loss_fn = nn.BCEWithLogitsLoss()
 
         self.auc_fn = torchmetrics.classification.BinaryAUROC()
         self.ap_fn = torchmetrics.classification.BinaryAveragePrecision()
         self.spe_fn = torchmetrics.classification.BinarySpecificity()
         self.sen_fn = torchmetrics.classification.BinaryRecall()
 
+        self.val_auc_fn = torchmetrics.classification.BinaryAUROC()
+        self.val_ap_fn = torchmetrics.classification.BinaryAveragePrecision()
+        self.val_spe_fn = torchmetrics.classification.BinarySpecificity()
+        self.val_sen_fn = torchmetrics.classification.BinaryRecall()
+
+        self.test_auc_fn = torchmetrics.classification.BinaryAUROC()
+        self.test_ap_fn = torchmetrics.classification.BinaryAveragePrecision()
+        self.test_spe_fn = torchmetrics.classification.BinarySpecificity()
+        self.test_sen_fn = torchmetrics.classification.BinaryRecall()
+
+        self.save_hyperparameters()
 
 
-    def training_step(self, batch, batch_idx):
+    def forward(self, batch, batch_idx):
         x = batch.x
-        y = batch.y
         edge_index = batch.edge_index
 
         if batch.edge_attr is not None:
             edge_attr = batch.edge_attr
+        else:
+            edge_attr = None
 
-        x = self.feature_extractor(x)
-        x = self.gnn(x, edge_index, batch.batch)  
+        x = self.extractor(x)
+        x = self.gnn(x=x, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr)  
 
-        pred = self.classify(x)
+        return self.classify(x)
+        
 
-        loss = self.loss_fn(pred, y)
+    def training_step(self, batch, batch_idx):
+        
+        pred = self.forward(batch, batch_idx) 
 
-        self.auc_fn(pred, y) 
-        self.ap_fn(pred, y) 
-        self.sen_fn(pred, y) 
-        self.spe_fn(pred, y) 
+        loss = self.loss_fn(pred, batch.y.to(torch.float))
 
-        self.log("train_loss_step", loss, on_epoch=True)
-        self.log("train_auc_step", self.auc_fn, on_epoch=True)
-        self.log("train_ap_step", self.ap_fn, on_epoch=True)
-        self.log("train_sen_step", self.sen_fn, on_epoch=True)
-        self.log("train_spe_step", self.spe_fn, on_epoch=True)
+        self.auc_fn(pred, batch.y) 
+        self.ap_fn(pred, batch.y.to(torch.int64)) 
+        self.sen_fn(pred, batch.y) 
+        self.spe_fn(pred, batch.y) 
+
+        self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+        self.log("train_auc", self.auc_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+        self.log("train_ap", self.ap_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+        self.log("train_sen", self.sen_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+        self.log("train_spe", self.spe_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+
+        return loss
 
 
     def validation_step(self, batch, batch_idx):
-        x = batch.x
-        y = batch.y
-        edge_index = batch.edge_index
+        pred = self.forward(batch, batch_idx)
 
-        if batch.edge_attr is not None:
-            edge_attr = batch.edge_attr
+        val_loss = self.val_loss_fn(pred, batch.y.to(torch.float))
 
-        x = self.feature_extractor(x)
-        x = self.gnn(x, edge_index, batch.batch)  
+        self.val_auc_fn(pred, batch.y) 
+        self.val_ap_fn(pred, batch.y.to(torch.int64)) 
+        self.val_sen_fn(pred, batch.y) 
+        self.val_spe_fn(pred, batch.y) 
 
-        pred = self.classify(x)
+        self.log_dict({"val_loss": val_loss,
+        "val_auc": self.val_auc_fn,
+        "val_ap": self.val_ap_fn,
+        "val_sen": self.val_sen_fn,
+        "val_spe": self.val_spe_fn,
+        }, batch_size=len(batch.batch))
 
-        val_loss = self.loss_fn(pred, y)
-
-        self.auc_fn(pred, y) 
-        self.ap_fn(pred, y) 
-        self.sen_fn(pred, y) 
-        self.spe_fn(pred, y) 
-
-        self.log("val_loss", val_losa=s)
-        self.log("val_auc", self.auc_fn)
-        self.log("val_ap", self.ap_fn)
-        self.log("val_sen", self.sen_fn)
-        self.log("val_spe", self.spe_fn)
-
+        return {"val_loss": val_loss}
 
     def test_step(self, batch, batch_idx):
-        x = batch.x
-        y = batch.y
-        edge_index = batch.edge_index
+        pred = self.forward(batch, batch_idx)
 
-        if batch.edge_attr is not None:
-            edge_attr = batch.edge_attr
+        test_loss = self.test_loss_fn(pred, batch.y.to(torch.float))
 
-        x = self.feature_extractor(x)
-        x = self.gnn(x, edge_index, batch.batch)  
+        self.test_auc_fn(pred, batch.y) 
+        self.test_ap_fn(pred, batch.y.to(torch.int64)) 
+        self.test_sen_fn(pred, batch.y) 
+        self.test_spe_fn(pred, batch.y) 
 
-        pred = self.classify(x)
+        self.log("test_auc", self.test_auc_fn)
+        self.log("test_ap", self.test_ap_fn)
+        self.log("test_sen", self.test_sen_fn)
+        self.log("test_spe", self.test_spe_fn)
 
-        test_loss = self.loss_fn(pred, y)
-
-        self.auc_fn(pred, y) 
-        self.ap_fn(pred, y) 
-        self.sen_fn(pred, y) 
-        self.spe_fn(pred, y) 
-
-        self.log("test_auc", self.auc_fn)
-        self.log("test_ap", self.ap_fn)
-        self.log("test_sen", self.sen_fn)
-        self.log("test_spe", self.spe_fn)
+    def predict_step(self, batch, batch_idx):
+        x = self.forward(batch, batch_idx)
+        turn = nn.Sigmoid()
+        pred = turn(x)
+        return pred
 
 
     def configure_optimizers(self):
@@ -146,3 +155,4 @@ class CNN_GNN(L.LightningModule):
 
         return {'optimizer': optimizer,
                 'lr_scheduler': lr_scheduler_config,}
+

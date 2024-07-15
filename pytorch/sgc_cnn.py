@@ -151,10 +151,12 @@ class SGC_CNN(nn.Module):
 
        
     def threshold_seg(self, x):
-        return torch.where(torch.equal(x[0], torch.zeros(x[0].size()), torch.zeros(x[0].size()), x[1])
+        return torch.where(torch.equal(x[0], torch.zeros(x[0].size()), torch.zeros(x[0].size()), x[1]))
 
 
     def forward(self, x, clinical=None):
+
+        xi = x
 
         x1 = self.cn1(x)
         x1_pool = self.cn1_pool(x1)
@@ -182,16 +184,18 @@ class SGC_CNN(nn.Module):
         xd = torch.cat((xd, x1), 1)  
         xd = self.d4(xd)
 
-        x = self.threshold((x, xd))
+        #xd is the activation map, what we need to compare the seg to
+        xout = self.threshold((x, xd))
 
-        x = self.cnn(x)
+        xout = torch.multiply(xout, xi) 
+        xout = self.cnn(xout)
 
         if clinical is not None:
-            x = torch.cat((x, clinical), 1)
+            xout = torch.cat((xout, clinical), 1)
 
-        x = self.classify(x)
+        xout = self.classify(xout)
 
-        return x
+        return xout
 
     
        

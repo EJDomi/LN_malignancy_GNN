@@ -118,18 +118,23 @@ class DatasetGeneratorImage(Dataset):
                     patch = self.apply_rotation(patch, angle)
                     seg = self.apply_rotation(seg, angle)
 
-                graph_nx.nodes[node]['x'] = torch.from_numpy(np.expand_dims(patch, 0))
+                graph_nx.nodes[node]['x'] = torch.tensor(np.expand_dims(patch, 0), dtype=torch.float)
                 #graph_nx.nodes[node]['x'] = torch.from_numpy(np.stack((patch, seg)))
 
                 # input y will be malignancy status, y1 will be the mask for segmentation guided network
                 graph_nx.nodes[node]['y1'] = torch.from_numpy(np.expand_dims(seg, 0))
-                graph_nx.nodes[node]['y'] = group_df.loc[(full_pat, node), 'labels']
+                graph_nx.nodes[node]['y'] = torch.tensor(group_df.loc[(full_pat, node), 'labels'], dtype=torch.long)
                 graph_nx.nodes[node]['features'] = torch.from_numpy(group_df.loc[(full_pat, node), ['dist_to_pri', 'pri_location', 'pri_lat', 'ln_level', 'ln_lat']].values)
                 graph_nx.graph['patient'] = full_pat
+                
+                del patch
+                del seg
               
             graph_pyg = from_networkx(graph_nx)
            
             torch.save(graph_pyg, f"{self.processed_dir}/graph_{idx}_{full_pat}.pt")
+            del graph_nx
+            del graph_pyg
             idx += 1
       
 

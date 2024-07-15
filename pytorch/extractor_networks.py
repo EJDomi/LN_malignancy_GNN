@@ -2,8 +2,9 @@ import torch
 from torch import nn
 from torch.nn import LeakyReLU, Dropout
 
-from LN_project_repo.pytorch.resnet import * 
-from LN_project_repo.pytorch.densenet import DenseNet3d 
+from LN_malignancy_GNN.pytorch.resnet import * 
+from LN_malignancy_GNN.pytorch.sgc_cnn import SGC_CNN 
+from LN_malignancy_GNN.pytorch.densenet import DenseNet3d 
 
 
 
@@ -69,7 +70,7 @@ class LNCNN(nn.Module):
         self.relu = nn.ReLU()
 
 
-    def forward(self, x, edge_index, edge_attr, batch, clinical, radiomics=None):
+    def forward(self, x):
         x = self.cn1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -110,7 +111,6 @@ class LNCNN(nn.Module):
         x = self.relu(x)
         #x = self.avgpool(x)
         x = self.flatten(x)
-        x = torch.cat((x, clinical), 1)
          
         x = self.linear(x)
         x = self.dropout(x)

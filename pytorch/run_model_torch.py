@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pandas as pd
 import pickle
-
+from pathlib import Path
 from tqdm.auto import tqdm
 
 from sklearn.model_selection import train_test_split, StratifiedKFold
@@ -25,10 +25,10 @@ from torch.utils.tensorboard import SummaryWriter
 import torchvision
 import torchmetrics
 
-import lightning as L
+import pytorch_lightning as L
 
-from LN_project_repo.pytorch.lightning_GNN import CNN_GNN
-from LN_project_repo.pytorch.dataset_class import DatasetGeneratorImage
+from LN_malignancy_GNN.pytorch.lightning_GNN import CNN_GNN
+from LN_malignancy_GNN.pytorch.dataset_class import DatasetGeneratorImage
 
 #models that use edge_attr
 
@@ -43,6 +43,9 @@ class RunModel(object):
             self.log_dir = os.path.join('logs', datetime.now().strftime("%Y%m%d-%H%M%S"))
         else:
             self.log_dir = os.path.join('logs', self.config['log_dir'])
+
+        self.metric_dir = os.path.join(self.log_dir, 'metric_dfs')
+        Path(self.metric_dir).mkdir(parents=True, exist_ok=True)
         print(f"logs are located at: {self.log_dir}")
         #self.writer = SummaryWriter(self.log_dir)
         print('remember to set the data')
@@ -114,38 +117,85 @@ class RunModel(object):
 
             
     def set_data_module(self):
-        self.data_module_cross_val = [LightningDataset(train_dataset=self.data[fold], val_dataset=self.data[self.val_splits[idx]], test_dataset=self.data[self.test_splits[idx]], batch_size=self.config['batch_size'], shuffle=True, pin_memory=True) for idx, fold in enumerate(self.train_splits)] 
+        self.data_module_cross_val = [LightningDataset(train_dataset=self.data[fold], val_dataset=self.data[self.val_splits[idx]], test_dataset=self.data[self.test_splits[idx]], batch_size=self.config['batch_size'], num_workers=19, pin_memory=True, persistent_workers=False, shuffle=True) for idx, fold in enumerate(self.train_splits)] 
 
 
     def set_callbacks(self):
         self.callbacks = []
 
         #Checkpoint options
-        self.callbacks.append(L.pytorch.callbacks.ModelCheckpoint(
+        self.callbacks.append(L.callbacks.ModelCheckpoint(
             monitor='val_loss', 
             mode='min', 
             save_top_k=5,
-            dirpath=self.log_dir,
-            filename='model_{epoch:02d}_{val_loss:.2f}',
+            dirpath=os.path.join(self.log_dir, 'top_models'),
+            filename='model_{epoch:02d}_{val_loss:.2f}_{val_auc:.2f}',
             ))
      
-        self.callbacks.append(L.pytorch.callbacks.EarlyStopping(monitor='val_loss', patience=10))
+        #self.callbacks.append(L.callbacks.EarlyStopping(monitor='val_loss', patience=10, check_on_train_epoch_end=False))
 
-        self.callbacks.append(L.pytorch.callbacks.LearningRateFinder(min_lr=1e-6, max_lr=1e-1))
+        self.callbacks.append(L.callbacks.LearningRateFinder(min_lr=1e-6, max_lr=1e-1))
 
                
     def run(self, resume=False, resume_idx=None):
+        self.trainers = []
+        self.metrics = {}
+        
+        self.metrics['val'] = []
+        self.metrics['test'] = []
 
-        self.set_callbacks()
+        for idx in range(5):
+            self.set_model()
+            self.set_callbacks()
 
-        trainer = L.Trainer(
-            max_epochs=self.config['n_epochs'],
-            accelerator="auto",
-            devices=1 if torch.cuda.is_available() else None,
-            logger=L.pytorch.loggers.CSVLogger(save_dir=self.log_dir),
-            callbacks=self.callbacks,
-            )
+            self.trainers.append(L.Trainer(
+                max_epochs=self.config['n_epochs'],
+                accelerator="auto",
+                devices=self.config['gpu_device'] if torch.cuda.is_available() else None,
+                logger=L.loggers.CSVLogger(save_dir=self.log_dir),
+                callbacks=self.callbacks,
+                #check_val_every_n_epoch = 1,
+                #auto_lr_find=True
+                ))
+ 
+            self.trainers[idx].fit(self.model, datamodule=self.data_module_cross_val[idx])
+            self.metrics['val'].append(self.trainers[idx].validate(self.model, datamodule=self.data_module_cross_val[idx]))
+            self.metrics['test'].append(self.trainers[idx].test(self.model, datamodule=self.data_module_cross_val[idx]))
 
-        trainer.fit(self.model, self.data_module_cross_val[0])
-        trainer.test(self.model, datamodule=self.data_module_cross_val[0])
-         
+        pd.DataFrame(self.metrics['val']).to_pickle(os.path.join(self.metric_dir, 'val_metrics.pkl'))
+        pd.DataFrame(self.metrics['test']).to_pickle(os.path.join(self.metric_dir, 'test_metrics.pkl'))
+
+
+
+
+    def get_predictions(self):
+        """
+        get predictions from list of trainers stored in self.trainers
+        requires run() to be executed as a prerequisite
+        this will get a set of predictions for each fold
+        """
+
+        test_predictions_dict = []
+        val_predictions_dict = []
+        for idx, trainer in enumerate(self.trainers):
+            test_predictions_dict.append({})
+            val_predictions_dict.append({})
+            tmp_test_targets = []
+            tmp_val_targets = []
+            test_predictions_dict[idx]['predictions'] = torch.cat(trainer.predict(trainer.model, self.data_module_cross_val[idx].test_dataloader()))
+            val_predictions_dict[idx]['predictions'] = torch.cat(trainer.predict(trainer.model, self.data_module_cross_val[idx].val_dataloader()))
+            for batch in self.data_module_cross_val[idx].test_dataloader():
+                tmp_test_targets.append(batch.y)
+            for batch in self.data_module_cross_val[idx].val_dataloader():
+                tmp_val_targets.append(batch.y)
+
+            test_predictions_dict[idx]['targets'] = torch.cat(tmp_test_targets)
+            val_predictions_dict[idx]['targets'] = torch.cat(tmp_val_targets)
+
+        self.test_predictions_df = pd.DataFrame(test_predictions_dict)
+        self.val_predictions_df = pd.DataFrame(val_predictions_dict)
+
+        self.test_predictions_df.to_pickle(os.path.join(self.metric_dir, 'test_predictions.pkl'))
+        self.val_predictions_df.to_pickle(os.path.join(self.metric_dir, 'val_predictions.pkl'))
+
+

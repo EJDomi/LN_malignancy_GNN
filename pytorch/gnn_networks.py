@@ -6,6 +6,15 @@ from torch_geometric.nn import DeepGCNLayer, GENConv, GraphUNet
 from torch_geometric.nn import global_mean_pool
 
 
+
+class EmptyNetwork(nn.Module):
+    def __init__(self, in_channels, hidden_channels, n_classes, edge_dim=None, dropout=0.5):
+        self.identity = nn.Identity()
+
+    def forward(self, x, edge_index, batch, edge_attr=None):
+        return self.Identity(x)
+
+
 class GatedGCN(nn.Module):
     def __init__(self, in_channels, hidden_channels, n_classes, edge_dim=3, dropout=0.5):
         super(GatedGCN, self).__init__()
@@ -20,7 +29,7 @@ class GatedGCN(nn.Module):
         self.norm3 = BatchNorm(in_channels=hidden_channels, allow_single_element=True)
         self.dropout = Dropout(dropout)
 
-    def forward(self, x, edge_index, edge_attr, batch):
+    def forward(self, x, edge_index, batch, edge_attr=None):
         x = self.dropout(x)
         x = self.conv1(x=x, edge_index=edge_index, edge_attr=edge_attr)
         x = self.relu(x)
@@ -35,13 +44,13 @@ class GatedGCN(nn.Module):
         x = self.norm3(x)
         x = self.dropout(x)
        
-        x = global_mean_pool(x, batch)
+        #x = global_mean_pool(x, batch)
 
         return x
 
 
 class DeepGCN(nn.Module):
-    def __init__(self, in_channels, hidden_channels, num_layers, n_classes, num_clinical, edge_dim=1, dropout=0.5):
+    def __init__(self, in_channels, hidden_channels, num_layers, n_classes, edge_dim=1, dropout=0.5):
         super(DeepGCN, self).__init__()
 
         self.layers = nn.ModuleList()
@@ -62,7 +71,7 @@ class DeepGCN(nn.Module):
         self.dropout = Dropout(dropout)
 
 
-    def forward(self, x, edge_index, edge_attr, batch, clinical):
+    def forward(self, x, edge_index, batch, edge_attr=None):
         x = self.layers[0].conv(x, edge_index, edge_attr)
 
         for layer in self.layers[1:]:
@@ -72,7 +81,7 @@ class DeepGCN(nn.Module):
         x = self.layers[0].act(self.layers[0].norm(x))
         x = self.dropout(x)
  
-        x = global_mean_pool(x, batch)
+        #x = global_mean_pool(x, batch)
 
         return x
 
@@ -86,9 +95,9 @@ class myGraphUNet(nn.Module):
         self.dropout = Dropout(dropout)
 
 
-    def forward(self, x, edge_index, batch, clinical):
+    def forward(self, x, edge_index, batch, clinical, edge_attr=None):
         x = self.graphunet(x, edge_index, batch)
 
-        x = global_mean_pool(x, batch)
+        #x = global_mean_pool(x, batch)
 
         return x

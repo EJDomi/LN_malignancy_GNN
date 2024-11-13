@@ -137,7 +137,7 @@ class SGC_CNN(nn.Module):
 
         self.cnn = nn.Sequential(*self.cnn)
 
-        self.classify = nn.Linear(256, 2)
+        #self.classify = nn.Linear(256, 2)
  
 
     def cnn_bn_relu(channels=(64,64), kernel=(3,3,3), stride=(1,1,1), padding=0):
@@ -190,12 +190,12 @@ class SGC_CNN(nn.Module):
         xout = torch.multiply(xout, xi) 
         xout = self.cnn(xout)
 
-        if clinical is not None:
-            xout = torch.cat((xout, clinical), 1)
+        #if clinical is not None:
+        #    xout = torch.cat((xout, clinical), 1)
 
-        xout = self.classify(xout)
+        #xout = self.classify(xout)
 
-        return xout
+        return xout, xd
 
     
        

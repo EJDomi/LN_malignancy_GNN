@@ -8,12 +8,12 @@ import pandas as pd
 
 from tqdm.auto import tqdm
 
-from scipy.ndimage import center_of_mass
+from scipy.ndimage import center_of_mass, rotate
 import scipy.io
 
 import SimpleITK as sitk
 from sklearn.preprocessing import MinMaxScaler
-from skimage.transform import rotate
+#from skimage.transform import rotate
 from skimage.util import random_noise
 
 import torch
@@ -35,11 +35,13 @@ class DatasetGeneratorImage(Dataset):
         self.resume = resume
         self.patients = pd.read_pickle(self.data_path.joinpath(self.config['patient_feature_file']))
         # change labels to one class [1,0] -> 0
-        self.patients['labels'] = self.patients['labels'].apply(lambda x: list(x)[1]) 
-
+        if self.config['n_classes'] == 1:
+            self.patients['labels'] = self.patients['labels'].apply(lambda x: list(x)[1]) 
+       
         self.graph_dir = self.data_path.joinpath(f"graph_staging/{self.patch_path.name}_{self.config['edge_file'].replace('.pkl', '')}_{self.config['data_version']}")
 
         self.rng_rotate = np.random.default_rng(42)
+        self.rng_rotate_axis = np.random.default_rng(42)
         if self.config['n_rotations'] > 0:
             self.aug_patients = self.patients.copy(deep=True)
             aug_pats = self.patients.copy(deep=True)
@@ -50,18 +52,38 @@ class DatasetGeneratorImage(Dataset):
                     self.aug_patients = aug_rot_pats
                 else:
                     self.aug_patients = pd.concat([self.aug_patients, aug_rot_pats])
+        else:
+            self.aug_patients = None
 
-            if self.config['balance_classes']:
+        if self.config['balance_classes']:
+            if self.config['n_classes'] > 1:
+                n_neg_avg = (aug_pats.groupby('patients')['labels'].mean().str[1]<0.5).sum()
+                n_pos_avg = (aug_pats.groupby('patients')['labels'].mean().str[1]>=0.5).sum()
+            elif self.config['n_classes'] == 1:
                 n_neg_avg = (aug_pats.groupby('patients').mean('nodes')['labels']<0.5).sum()
                 n_pos_avg = (aug_pats.groupby('patients').mean('nodes')['labels']>=0.5).sum()
-                ratio_classes = int(floor(n_neg_avg / n_pos_avg))
-                for rot in range(ratio_classes):
+            ratio_classes = int(floor(n_neg_avg / n_pos_avg))
+            aug_pats = self.patients.copy(deep=True)
+            for rot in range(ratio_classes):
+                if self.config['n_classes'] == 1:
                     aug_pos_pats = aug_pats.copy(deep=True)[aug_pats['labels']==1]
-                    aug_pos_pats.index = aug_pos_pats.index.set_levels(aug_pos_pats.index.levels[aug_pos_pats.index.names.index('patients')] + f"_pos_rotation_{rot+1}", level='patients')
+                elif self.config['n_classes'] == 2:
+                    aug_pos_pats = aug_pats.copy(deep=True)[aug_pats['labels'].str[1]==1]
+                aug_pos_pats.index = aug_pos_pats.index.set_levels(aug_pos_pats.index.levels[aug_pos_pats.index.names.index('patients')] + f"_pos_rotation_{rot+1}", level='patients')
+                if rot == 0:
+                    self.aug_pos_patients = aug_pos_pats
+                else:
+                    self.aug_pos_patients = pd.concat([self.aug_pos_patients, aug_pos_pats])
                 
             self.aug_patients = self.aug_patients.drop([idx for idx in self.aug_patients.index if 'rotation' not in idx[0]])
         else:
-            self.aug_patients = None
+            self.aug_pos_patients = None
+
+        self.full_patients = self.patients.copy(deep=True)
+        if self.config['n_rotations'] > 0:
+            self.full_patients = pd.concat([self.full_patients, self.aug_patients])
+        if self.config['balance_classes']:
+            self.full_patients = pd.concat([self.full_patients, self.aug_pos_patients])
         
                             
 
@@ -81,10 +103,18 @@ class DatasetGeneratorImage(Dataset):
 
     @property
     def processed_file_names(self):
+        file_names = [f"graph_{idx}_{pat}.pt" for idx, pat in enumerate(self.patients.index.get_level_values(0).unique())]
         if self.config['n_rotations'] > 0:
-            file_names = [f"graph_{idx}_{pat}.pt" for idx, pat in enumerate(list(self.patients.index.levels[0])+list(self.aug_patients.index.levels[0]))]
-        else:
-            file_names = [f"graph_{idx}_{pat}.pt" for idx, pat in enumerate(self.patients.index.levels[0])]
+            n_files = len(file_names)
+            file_names.extend([f"graph_{idx+n_files}_{pat}.pt" for idx, pat in enumerate(self.aug_patients.index.get_level_values(0).unique())])
+        if self.config['balance_classes']:
+            n_files = len(file_names)
+            file_names.extend([f"graph_{idx+n_files}_{pat}.pt" for idx, pat in enumerate(self.aug_pos_patients.index.get_level_values(0).unique())])
+        #elif self.config['balance_classes']:
+        #    file_names = [f"graph_{idx}_{pat}.pt" for idx, pat in enumerate(list(self.patients.index.levels[0])+list(self.aug_pos_patients.index.levels[0]))]
+        #elif self.config['n_rotations'] > 0:
+        #    file_names = [f"graph_{idx}_{pat}.pt" for idx, pat in enumerate(list(self.patients.index.levels[0])+list(self.aug_patients.index.levels[0]))]
+
         return file_names
 
 
@@ -94,17 +124,57 @@ class DatasetGeneratorImage(Dataset):
 
     def process(self):
         print("processed graph files not present, starting graph production")
-        idx = 0
-        for full_pat, group_df in tqdm(self.patients.groupby('patients')):
+        self.idx = 0
+
+        self.process_graph(self.patients, to_rotate=False)
+
+        if self.aug_patients is not None: 
+            self.process_graph(self.aug_patients, to_rotate=True) 
+ 
+        if self.aug_pos_patients is not None:
+            self.process_graph(self.aug_pos_patients, to_rotate=True) 
+
+
+    def process_graph(self, patient_group, to_rotate=False):
+        for full_pat, group_df in tqdm(patient_group.groupby('patients', sort=False)):
             if self.resume is not None:
-                if idx < self.resume:
-                    idx += 1
+                if self.idx < self.resume:
+                    self.idx += 1
                     continue
             pat = full_pat.split('_')[0]
             graph_nx = self.edge_dict[pat]
 
-            if 'rotation' in full_pat:
-                angle = self.rng_rotate.integers(-30, high=30)
+            if to_rotate:
+                self.angle = self.rng_rotate.integers(-30, high=31)
+                self.rotate_axes = self.rng_rotate_axis.integers(0, high=3)
+
+            if self.config['include_primary']:
+                primary_seg_path = f"{self.config['primary_dir']}/{pat}/primary_tumor/primary_seg.mat"
+                ct_path = f"{self.config['primary_dir']}/{pat}/CT_int/ct.mat"
+
+                primary = scipy.io.loadmat(self.data_path.joinpath(ct_path))['ct_int']
+                primary_seg = scipy.io.loadmat(self.data_path.joinpath(primary_seg_path))['primary_seg_int']
+
+                com = center_of_mass(primary_seg)
+
+                primary_patch = primary[(max(com[0]-25, 0)):(com[0]+25),
+                                  (max(com[1]-25, 0)):(com[1]+25),
+                                  (max(com[2]-10, 0)):(com[2]+10)]
+
+                padding = (50 - patch_cut.size()[0],
+                           50 - patch_cut.size()[1],
+                           20 - patch_cut.size()[2])
+                primary_patch = np.pad(primary_patch, pad_width((padding[0] // 2, padding[0]//2+padding[0]%2),
+                                                                (padding[1] // 2, padding[0]//2+padding[1]%2),
+                                                                (padding[2] // 2, padding[0]//2+padding[2]%2)),
+                                                        mode='constant', constant_values=0)
+               
+                 
+                graph_nx.nodes[0]['x'] = torch.tensor(np.expand_dims(primary_patch, 0), dtype=torch.float)
+                graph_nx.nodes[0]['y'] = torch.tensor([0,1], dtype=torch.long)
+                graph_nx.nodes[0]['pos'] = torch.tensor([com], dtype=torch.float)
+                graph_nx.nodes[0]['patch_type'] = 'primary'
+                del primary_patch, primary, primary_seg
 
             for node in group_df.index:
                 node = node[1] #index is a multiindex, with node # in second position
@@ -114,9 +184,16 @@ class DatasetGeneratorImage(Dataset):
                 patch = scipy.io.loadmat(self.patch_path.joinpath(f"ct/{node_name}.mat"))['roi_patch_ct']
                 seg = scipy.io.loadmat(self.patch_path.joinpath(f"seg/{node_name}.mat"))['roi_patch_seg']
 
-                if 'rotation' in full_pat:
-                    patch = self.apply_rotation(patch, angle)
-                    seg = self.apply_rotation(seg, angle)
+                full_seg_dir = f"{self.config['primary_dir']}/{pat}/LN/{node}/seg_int.mat"
+                full_seg = scipy.io.loadmat(self.data_path.joinpath(full_seg_dir))['seg_int']
+
+                node_com = center_of_mass(full_seg)
+                graph_nx.nodes[node]['pos'] = torch.tensor([node_com], dtype=torch.float)
+                del full_seg
+
+                if to_rotate:
+                    patch = self.apply_rotation(patch, self.angle, self.rotate_axes)
+                    seg = self.apply_rotation(seg, self.angle, self.rotate_axes)
 
                 graph_nx.nodes[node]['x'] = torch.tensor(np.expand_dims(patch, 0), dtype=torch.float)
                 #graph_nx.nodes[node]['x'] = torch.from_numpy(np.stack((patch, seg)))
@@ -124,77 +201,44 @@ class DatasetGeneratorImage(Dataset):
                 # input y will be malignancy status, y1 will be the mask for segmentation guided network
                 graph_nx.nodes[node]['y1'] = torch.from_numpy(np.expand_dims(seg, 0))
                 graph_nx.nodes[node]['y'] = torch.tensor(group_df.loc[(full_pat, node), 'labels'], dtype=torch.long)
+                graph_nx.nodes[node]['patch_type'] = 'LN'
                 graph_nx.nodes[node]['features'] = torch.from_numpy(group_df.loc[(full_pat, node), ['dist_to_pri', 'pri_location', 'pri_lat', 'ln_level', 'ln_lat']].values)
+                
                 graph_nx.graph['patient'] = full_pat
                 
                 del patch
                 del seg
               
             graph_pyg = from_networkx(graph_nx)
-           
-            torch.save(graph_pyg, f"{self.processed_dir}/graph_{idx}_{full_pat}.pt")
+            norm_transform = T.Cartesian()
+            graph_pyg = norm_transform(graph_pyg)
+ 
+            torch.save(graph_pyg, f"{self.processed_dir}/graph_{self.idx}_{full_pat}.pt")
             del graph_nx
             del graph_pyg
-            idx += 1
-      
-
-        if self.aug_patients is not None: 
-            for full_pat, group_df in tqdm(self.aug_patients.groupby('patients')):
-                if self.resume is not None:
-                    if idx < self.resume:
-                        idx += 1
-                        continue
-                pat = full_pat.split('_')[0]
-                graph_nx = self.edge_dict[pat]
-
-                if 'rotation' in full_pat:
-                    angle = self.rng_rotate.integers(-30, high=30)
-
-                for node in group_df.index:
-                    node = node[1] #index is a multiindex, with node # in second position
-
-                    node_name = f"{pat}_{node}"
-
-                    patch = scipy.io.loadmat(self.patch_path.joinpath(f"ct/{node_name}.mat"))['roi_patch_ct']
-                    seg = scipy.io.loadmat(self.patch_path.joinpath(f"seg/{node_name}.mat"))['roi_patch_seg']
-
-                    if 'rotation' in full_pat:
-                        patch = self.apply_rotation(patch, angle)
-                        seg = self.apply_rotation(seg, angle)
-
-                    graph_nx.nodes[node]['x'] = torch.from_numpy(np.expand_dims(patch, 0))
-                    #graph_nx.nodes[node]['x'] = torch.from_numpy(np.stack((patch, seg)))
-
-                    # input y will be malignancy status, y1 will be the mask for segmentation guided network
-                    graph_nx.nodes[node]['y1'] = torch.from_numpy(seg)
-                    graph_nx.nodes[node]['y'] = group_df.loc[(full_pat, node), 'labels']
-                    graph_nx.nodes[node]['features'] = torch.from_numpy(group_df.loc[(full_pat, node), ['dist_to_pri', 'pri_location', 'pri_lat', 'ln_level', 'ln_lat']].values)
-                  
+            self.idx += 1
 
 
-                graph_pyg = from_networkx(graph_nx)
-                
 
-                torch.save(graph_pyg, f"{self.processed_dir}/graph_{idx}_{full_pat}.pt")
-                idx += 1
- 
 
     def len(self):
-        return len(self.patients)
+        n_patients = len(self.patients.index.get_level_values(0).unique())
+        if self.config['n_rotations'] > 0:
+            n_patients += len(self.aug_patients.index.get_level_values(0).unique())
+        if self.config['balance_classes']:
+            n_patients += len(self.aug_pos_patients.index.get_level_values(0).unique())
+        return n_patients
 
 
     def get(self, idx):
-        if self.config['n_rotations'] > 0:
-            pat = pd.concat([self.patients, self.aug_patients]).index.get_level_values(0).unique()[idx]
-        else:
-            pat = self.patients.index.get_level_values(0).unique()[idx]
+        pat = self.full_patients.index.get_level_values(0).unique()[idx]
         data = torch.load(f"{self.processed_dir}/graph_{idx}_{pat}.pt")
-        #data = torch.load(f"{self.processed_dir}/graph_{idx}.pt")
         return data
 
 
-    def apply_rotation(self, arr, angle):
-        arr = rotate(arr, angle, preserve_range=True)
+    def apply_rotation(self, arr, angle, rotate_axes):
+        axis_tuples = [(0,1), (0,2), (1,2)]
+        arr = rotate(arr, angle, axes=axis_tuples[rotate_axes], reshape=False)
         return arr
 
 

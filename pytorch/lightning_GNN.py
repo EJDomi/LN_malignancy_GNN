@@ -7,6 +7,7 @@ import torchmetrics
 
 import pytorch_lightning as L
 
+import LN_malignancy_GNN.pytorch.user_metrics as um
 import LN_malignancy_GNN.pytorch.extractor_networks as en
 import LN_malignancy_GNN.pytorch.gnn_networks as graphs
 
@@ -37,15 +38,17 @@ class CNN_GNN(L.LightningModule):
         super().__init__()
         self.config = config
         self.learning_rate = self.config['learning_rate']
-        self.extractor = getattr(en, self.config['extractor_name'])(in_channels=self.config['n_in_channels'], dropout=self.config['dropout'])
-        self.gnn = getattr(graphs, self.config['model_name'])(self.config['extractor_channels'], hidden_channels=self.config['n_hidden_channels'], n_classes=self.config['n_hidden_channels'], edge_dim=self.config['edge_dim'], dropout=self.config['dropout'])
+        self.extractor = getattr(en, self.config['extractor_name'])(n_classes=self.config['extractor_channels'], in_channels=self.config['n_in_channels'], dropout=self.config['dropout'])
+        #self.gnn = getattr(graphs, self.config['model_name'])(self.config['extractor_channels'], hidden_channels=self.config['n_hidden_channels'], n_classes=self.config['n_hidden_channels'], edge_dim=self.config['edge_dim'], dropout=self.config['dropout'], num_layers=self.config['num_deep_layers'])
+        
+        self.gnn = getattr(graphs, self.config['model_name'])(self.config['extractor_channels'], hidden_channels=self.config['n_hidden_channels'], n_classes=self.config['gnn_out_channels'], edge_dim=self.config['edge_dim'], dropout=self.config['dropout'])
  
-        self.classify = Classify(in_channels=self.config['n_hidden_channels'], n_classes=self.config['n_classes'])
+        self.classify = Classify(in_channels=self.config['gnn_out_channels']+(self.config['n_clinical'] if self.config['use_clinical'] else 0), n_classes=self.config['n_classes'])
 
-        self.loss_fn = nn.BCEWithLogitsLoss()
-        self.val_loss_fn = nn.BCEWithLogitsLoss()
-        self.test_loss_fn = nn.BCEWithLogitsLoss()
-
+        self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([self.config['class_weight']]))
+        #self.val_loss_fn = nn.BCEWithLogitsLoss()
+        #self.test_loss_fn = nn.BCEWithLogitsLoss()
+        self.m_fn = um.MMetric(0.6, 0.4)
         self.auc_fn = torchmetrics.classification.BinaryAUROC()
         self.ap_fn = torchmetrics.classification.BinaryAveragePrecision()
         self.spe_fn = torchmetrics.classification.BinarySpecificity()
@@ -61,38 +64,157 @@ class CNN_GNN(L.LightningModule):
         self.test_spe_fn = torchmetrics.classification.BinarySpecificity()
         self.test_sen_fn = torchmetrics.classification.BinaryRecall()
 
+        for m in self.extractor.modules():
+            self.init_params(m)
+        for m in self.gnn.modules():
+            self.init_params(m)
+        for m in self.classify.modules():
+            self.init_params(m)
+            #if isinstance(m, nn.BatchNorm3d):
+            #    m.weight.requires_grad = False
+
+        for param in self.extractor.parameters():
+            param.data = param.data.float()
+        for param in self.gnn.parameters():
+            param.data = param.data.float()
+        for param in self.classify.parameters():
+            param.data = param.data.float()
         self.save_hyperparameters()
 
 
-    def forward(self, batch, batch_idx):
+    def init_params(self, m):
+        """
+           Following is the doc string from stolen function:
+                Initialize the parameters of a module.
+                Parameters
+                ----------
+                m
+                    The module to initialize.
+                Notes
+                -----
+                Convolutional layer weights are initialized from a normal distribution
+                as described in [1]_ in `fan_in` mode. The final layer bias is
+                initialized so that the expected predicted probability accounts for
+                the class imbalance at initialization.
+                References
+                ----------
+                .. [1] K. He et al. ‘Delving Deep into Rectifiers: Surpassing
+                   Human-Level Performance on ImageNet Classification’,
+                   arXiv:1502.01852 [cs], Feb. 2015.
+        """
+        if isinstance(m, nn.Conv3d):
+            nn.init.xavier_uniform_(m.weight)
+        elif isinstance(m, nn.BatchNorm3d):
+            nn.init.constant_(m.weight, 1.)
+            nn.init.constant_(m.bias, 0.)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            nn.init.constant_(m.bias, 0.)
+
+
+    def normalize_features(self, batch):
+        '''
+        function to retrieve the difference in distance to primary and LN laterality
+        to be used as edge features in gnn
+        '''
+        features = batch.features.float()
+        batch_mean = batch.features[:, 0].mean()
+        batch_std = batch.features[:, 0].std()
+        if len(features[:, 0]) == 1:
+            features[:, 0] = 0.
+        else:
+            features[:, 0] = (batch.features[:,0] - batch_mean) / batch_std
+        return features
+
+
+    def _shared_eval_step(self, batch, batch_idx):
         x = batch.x
         edge_index = batch.edge_index
 
-        if batch.edge_attr is not None:
-            edge_attr = batch.edge_attr
+        if self.config['n_in_channels'] == 1 and self.config['region'] == 'MASK':
+            x = torch.where(batch.y1, x, 0.)
+        elif self.config['n_in_channels'] == 1 and self.config['region'] == 'ROI':
+            x = x 
+        elif self.config['n_in_channels'] == 2 and self.config['region'] == 'ROI':
+            x = torch.cat((x, x), dim=1)
+        elif self.config['n_in_channels'] == 2:
+            x = torch.cat((x, batch.y1), dim=1)
+
+        if self.config['use_clinical']:
+            features = self.normalize_features(batch)
         else:
-            edge_attr = None
+            features = None
+        #if self.config['edge_dim'] is not None:
+        #    edge_attr = self.get_edge_features(batch).float() 
+        #else:
+        edge_attr = None
 
         x = self.extractor(x)
-        x = self.gnn(x=x, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr)  
 
-        return self.classify(x)
+
+        if x.dim() == 1:
+            x = x.squeeze().unsqueeze(0)
+
+        x = self.gnn(x=x, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr) 
+ 
+        if self.config['include_primary']:
+            x = x[batch.patch_type != 'primary']
+            if features is not None:
+                features = features[batch.patch_type != 'primary']
+
+        return self.classify(x, features)
         
 
     def training_step(self, batch, batch_idx):
-        
-        pred = self.forward(batch, batch_idx) 
+        x = batch.x
+        edge_index = batch.edge_index
 
-        loss = self.loss_fn(pred, batch.y.to(torch.float))
+        if self.config['n_in_channels'] == 1 and self.config['region'] == 'MASK':
+            x = torch.where(batch.y1, x, 0.)
+        elif self.config['n_in_channels'] == 1 and self.config['region'] == 'ROI':
+            x = x 
+        elif self.config['n_in_channels'] == 2 and self.config['region'] == 'ROI':
+            x = torch.cat((x, x), dim=1)
+        elif self.config['n_in_channels'] == 2:
+            x = torch.cat((x, batch.y1), dim=1)
+
+        if self.config['use_clinical']:
+            features = self.normalize_features(batch)
+        else:
+            features = None
+
+        if self.config['freeze_extractor']:
+            with torch.no_grad():
+                x = self.extractor(x)
+        else:
+            x = self.extractor(x)
+        edge_attr = None
+
+        if x.dim() == 1:
+            x = x.squeeze().unsqueeze(0)
+
+        x = self.gnn(x=x, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr)  
+       
+        if self.config['include_primary']:
+            x = x[batch.patch_type != 'primary']
+            if features is not None:
+                features = features[batch.patch_type != 'primary']
+            y = batch.y[batch.patch_type != 'primary']
+        else:
+            y = batch.y
+        pred = self.classify(x, features) 
+
+        loss = self.loss_fn(pred, y.to(torch.float))
 
         self.auc_fn(pred, batch.y) 
         self.ap_fn(pred, batch.y.to(torch.int64)) 
         self.sen_fn(pred, batch.y) 
         self.spe_fn(pred, batch.y) 
 
-        self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=len(batch.batch))
-        self.log("train_auc", self.auc_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+        self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=len(batch.batch), prog_bar=True)
+        self.log("train_auc", self.auc_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch), prog_bar=True)
         self.log("train_ap", self.ap_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
+        self.log("train_m", self.m_fn(self.sen_fn.compute(), self.spe_fn.compute()), on_step=False, on_epoch=True, batch_size=len(batch.batch))
         self.log("train_sen", self.sen_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
         self.log("train_spe", self.spe_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch))
 
@@ -100,41 +222,53 @@ class CNN_GNN(L.LightningModule):
 
 
     def validation_step(self, batch, batch_idx):
-        pred = self.forward(batch, batch_idx)
+        pred = self._shared_eval_step(batch, batch_idx)
 
-        val_loss = self.val_loss_fn(pred, batch.y.to(torch.float))
+        if self.config['include_primary']:
+            y = batch.y[batch.patch_type != 'primary']
+        else:
+            y = batch.y
 
-        self.val_auc_fn(pred, batch.y) 
-        self.val_ap_fn(pred, batch.y.to(torch.int64)) 
-        self.val_sen_fn(pred, batch.y) 
-        self.val_spe_fn(pred, batch.y) 
+        val_loss = self.loss_fn(pred, y.to(torch.float))
 
-        self.log_dict({"val_loss": val_loss,
+        self.val_auc_fn(pred, y) 
+        self.val_ap_fn(pred, y.to(torch.int64)) 
+        self.val_sen_fn(pred, y) 
+        self.val_spe_fn(pred, y) 
+
+        self.log_dict({"val_loss": torch.tensor([val_loss]),
         "val_auc": self.val_auc_fn,
         "val_ap": self.val_ap_fn,
+        "val_m": self.m_fn(self.val_sen_fn.compute(), self.val_spe_fn.compute()),
         "val_sen": self.val_sen_fn,
         "val_spe": self.val_spe_fn,
-        }, batch_size=len(batch.batch))
+        }, batch_size=len(batch.batch), prog_bar=True)
 
         return {"val_loss": val_loss}
 
     def test_step(self, batch, batch_idx):
-        pred = self.forward(batch, batch_idx)
+        pred = self._shared_eval_step(batch, batch_idx)
 
-        test_loss = self.test_loss_fn(pred, batch.y.to(torch.float))
+        if self.config['include_primary']:
+            y = batch.y[batch.patch_type != 'primary']
+        else:
+            y = batch.y
 
-        self.test_auc_fn(pred, batch.y) 
-        self.test_ap_fn(pred, batch.y.to(torch.int64)) 
-        self.test_sen_fn(pred, batch.y) 
-        self.test_spe_fn(pred, batch.y) 
+        test_loss = self.loss_fn(pred, y.to(torch.float))
+
+        self.test_auc_fn(pred, y) 
+        self.test_ap_fn(pred, y.to(torch.int64)) 
+        self.test_sen_fn(pred, y) 
+        self.test_spe_fn(pred, y) 
 
         self.log("test_auc", self.test_auc_fn)
         self.log("test_ap", self.test_ap_fn)
+        self.log("test_m", self.m_fn(self.test_sen_fn.compute(), self.test_spe_fn.compute()))
         self.log("test_sen", self.test_sen_fn)
         self.log("test_spe", self.test_spe_fn)
 
     def predict_step(self, batch, batch_idx):
-        x = self.forward(batch, batch_idx)
+        x = self._shared_eval_step(batch, batch_idx)
         turn = nn.Sigmoid()
         pred = turn(x)
         return pred
@@ -144,15 +278,16 @@ class CNN_GNN(L.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
         
-        lr_scheduler_config = {
-            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer),
-            "interval": "epoch",
-            "frequency": self.config['lr_patience'],
-            "monitor": "val_loss",
-            "strict": True,
-            "name": None,
-        }
+        #lr_scheduler_config = {
+        #    "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer),
+        #    "interval": "epoch",
+        #    "frequency": self.config['lr_patience'],
+        #    "monitor": "val_loss",
+        #    "strict": True,
+        #    "name": None,
+        #}
 
-        return {'optimizer': optimizer,
-                'lr_scheduler': lr_scheduler_config,}
+        #return {'optimizer': optimizer,
+        #        'lr_scheduler': lr_scheduler_config,}
+        return {'optimizer': optimizer,}
 

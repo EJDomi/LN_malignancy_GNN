@@ -89,7 +89,11 @@ class Bottleneck(nn.Module):
 class ResNet(nn.Module):
     def __init__(self, block, layers, in_channels=3, n_classes=64, dropout=0.0, n_clinical=None):
         super(ResNet, self).__init__()
-        self.expansion = 4
+        if block == BasicBlock:
+            self.expansion = 1
+        if block == Bottleneck:
+            self.expansion = 4 
+  
         self.factor = 2
         self.conv1 = nn.Conv3d(in_channels, 64, kernel_size=(7,7,7), stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm3d(64)
@@ -115,7 +119,7 @@ class ResNet(nn.Module):
     
         self.avgpool = nn.AdaptiveAvgPool3d((1,1,1))
 
-        #self.classify = nn.LazyLinear(n_classes)
+        self.classify = nn.Linear(self.channels[-1]*self.expansion,n_classes)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -160,7 +164,7 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
 
-        #x = self.classify(x)
+        x = self.classify(x)
         return x
 
 

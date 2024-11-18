@@ -40,6 +40,7 @@ model_config = {
                 "transfer": None,
                 "n_rotations": 5,
                 "balance_classes": False,
+                "true_balance_classes": False,
                "num_deep_layers": 28,
                "data_path": '../../data/ln_malignancy',
                "primary_dir": 'Processed_Data',

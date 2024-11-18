@@ -62,7 +62,10 @@ class DatasetGeneratorImage(Dataset):
             elif self.config['n_classes'] == 1:
                 n_neg_avg = (aug_pats.groupby('patients').mean('nodes')['labels']<0.5).sum()
                 n_pos_avg = (aug_pats.groupby('patients').mean('nodes')['labels']>=0.5).sum()
-            ratio_classes = int(floor(n_neg_avg / n_pos_avg))
+            if self.config['true_balance_classes']:
+                ratio_classes = int(floor(n_neg_avg / n_pos_avg)) - 1
+            else:
+                ratio_classes = int(floor(n_neg_avg / n_pos_avg))
             aug_pats = self.patients.copy(deep=True)
             for rot in range(ratio_classes):
                 if self.config['n_classes'] == 1:
@@ -152,18 +155,17 @@ class DatasetGeneratorImage(Dataset):
                 primary_seg_path = f"{self.config['primary_dir']}/{pat}/primary_tumor/primary_seg.mat"
                 ct_path = f"{self.config['primary_dir']}/{pat}/CT_int/ct.mat"
 
-                primary = scipy.io.loadmat(self.data_path.joinpath(ct_path))['ct_int']
-                primary_seg = scipy.io.loadmat(self.data_path.joinpath(primary_seg_path))['primary_seg_int']
+                primary = np.array(scipy.io.loadmat(self.data_path.joinpath(ct_path))['ct_int'])
+                primary_seg = np.array(scipy.io.loadmat(self.data_path.joinpath(primary_seg_path))['primary_seg_int'])
 
                 com = center_of_mass(primary_seg)
 
-                primary_patch = primary[(max(com[0]-25, 0)):(com[0]+25),
-                                  (max(com[1]-25, 0)):(com[1]+25),
-                                  (max(com[2]-10, 0)):(com[2]+10)]
-
-                padding = (50 - patch_cut.size()[0],
-                           50 - patch_cut.size()[1],
-                           20 - patch_cut.size()[2])
+                primary_patch = np.array(primary[max(int(com[0])-25, 0):int(com[0])+25,
+                                  max(int(com[1])-25, 0):int(com[1])+25,
+                                  max(int(com[2])-10, 0):int(com[2])+10])
+                padding = (50 - primary_patch.size()[0],
+                           50 - primary_patch.size()[1],
+                           20 - primary_patch.size()[2])
                 primary_patch = np.pad(primary_patch, pad_width((padding[0] // 2, padding[0]//2+padding[0]%2),
                                                                 (padding[1] // 2, padding[0]//2+padding[1]%2),
                                                                 (padding[2] // 2, padding[0]//2+padding[2]%2)),
@@ -172,7 +174,7 @@ class DatasetGeneratorImage(Dataset):
                  
                 graph_nx.nodes[0]['x'] = torch.tensor(np.expand_dims(primary_patch, 0), dtype=torch.float)
                 graph_nx.nodes[0]['y'] = torch.tensor([0,1], dtype=torch.long)
-                graph_nx.nodes[0]['pos'] = torch.tensor([com], dtype=torch.float)
+                graph_nx.nodes[0]['pos'] = torch.tensor(com, dtype=torch.float)
                 graph_nx.nodes[0]['patch_type'] = 'primary'
                 del primary_patch, primary, primary_seg
 
@@ -188,7 +190,7 @@ class DatasetGeneratorImage(Dataset):
                 full_seg = scipy.io.loadmat(self.data_path.joinpath(full_seg_dir))['seg_int']
 
                 node_com = center_of_mass(full_seg)
-                graph_nx.nodes[node]['pos'] = torch.tensor([node_com], dtype=torch.float)
+                graph_nx.nodes[node]['pos'] = torch.tensor(node_com, dtype=torch.float)
                 del full_seg
 
                 if to_rotate:

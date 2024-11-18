@@ -144,13 +144,12 @@ class CNN_GNN(L.LightningModule):
             features = self.normalize_features(batch)
         else:
             features = None
-        #if self.config['edge_dim'] is not None:
-        #    edge_attr = self.get_edge_features(batch).float() 
-        #else:
-        edge_attr = None
+        if self.config['edge_dim'] is not None:
+            edge_attr = torch.nan_to_num(batch.edge_attr, nan=0.0)
+        else:
+            edge_attr = None
 
         x = self.extractor(x)
-
 
         if x.dim() == 1:
             x = x.squeeze().unsqueeze(0)
@@ -188,7 +187,10 @@ class CNN_GNN(L.LightningModule):
                 x = self.extractor(x)
         else:
             x = self.extractor(x)
-        edge_attr = None
+        if self.config['edge_dim'] is not None:
+            edge_attr = torch.nan_to_num(batch.edge_attr, nan=0.0)
+        else:
+            edge_attr = None
 
         if x.dim() == 1:
             x = x.squeeze().unsqueeze(0)

@@ -44,19 +44,20 @@ class RunMalignancyModel(RunModel):
         """
         self.model = getattr(gnn_modules, self.config['lightning_module'])(self.config) 
 
-    def make_folds_from_dir(out_file_name='preset_folds_malignancy.pkl'):
-        fold_dict = {}
+    def make_folds_from_dir(self, out_file_name='preset_folds_malignancy.pkl'):
+        self.fold_dict = {}
         patient_list = []
        
         for idx in range(5):
-            fold_dict[f"fold_{idx}"] = np.unique([f.name.split('_')[0] for f in self.data.data_path.glob(f"{self.config['fold_dir']}/F{idx+1}/label/*")])
+            fold_dir = self.data.data_path.joinpath(self.config['fold_dir'])
+            self.fold_dict[f"fold_{idx}"] = np.unique([f.name.split('_')[0] for f in fold_dir.glob(f"F{idx+1}/label/*")])
             patient_list.extend(np.unique([f.name.split('_')[0] for f in fold_dir.glob(f"F{idx+1}/label/*")]))
 
-        preset_fold_list = []
-        for fold in fold_dict:
-            preset_fold_list.append([patient_list.index(pat) for pat in fold_dict[fold]]) 
+        self.preset_fold_list = []
+        for fold in self.fold_dict:
+            self.preset_fold_list.append([patient_list.index(pat) for pat in self.fold_dict[fold]]) 
         with open(self.data.data_path.joinpath(out_file_name), 'wb') as f:
-            pickle.dump(preset_fold_list)
+            pickle.dump(self.preset_fold_list, f)
             f.close()
        
 
@@ -64,7 +65,10 @@ class RunMalignancyModel(RunModel):
 
         self.folds = None
         if self.config['preset_folds']:
+            if not os.path.exists(self.data.data_path.joinpath(self.config['preset_fold_file'])): 
+                self.make_folds_from_dir(self.config['preset_fold_file'])
             self.folds = pd.read_pickle(self.data.data_path.joinpath(self.config['preset_fold_file']))
+          
         else:
             self.folds = partition_dataset_classes(range(len(self.data.patients.index.get_level_values(0).unique())), self.data.patients.groupby('patients').mean('nodes')['labels']>=0.5, num_partitions=5, shuffle=True, seed=self.config['seed'])
             with open(self.data.data_path.joinpath(self.config['preset_fold_file']), 'wb') as f:

@@ -2,10 +2,12 @@ import torch
 from torch import nn
 from torch.nn import LeakyReLU, Dropout
 
+from monai.networks.nets.vit import ViT
+
 from LN_malignancy_GNN.pytorch.resnet import * 
 from LN_malignancy_GNN.pytorch.sgc_cnn import SGC_CNN 
 from LN_malignancy_GNN.pytorch.densenet import DenseNet3d 
-
+from LN_malignancy_GNN.pytorch.resnet_spottune import SpotTune
 
 
 
@@ -29,6 +31,43 @@ def resnet200(n_classes=1, in_channels=3, dropout=0.0, blocks=Bottleneck):
 def densenet3d(n_classes=1, in_channels=64, dropout = 0.0):
     return DenseNet3d(n_classes=n_classes, in_channels=in_channels, dropout_p=dropout)
 
+def svm_preds(n_classes=1, in_channel=64, dropout= 0.0):
+    return
+
+def spottune18(n_classes=1, in_channels=3, dropout=0.0, blocks=BasicBlock):
+    return SpotTune(main='main18', in_channels=in_channels, num_classes=n_classes, dropout=dropout)
+
+def spottune34(n_classes=1, in_channels=3, dropout=0.0, blocks=BasicBlock):
+    return SpotTune(main='main34', in_channels=in_channels, num_classes=n_classes, dropout=dropout)
+
+def spottune50(n_classes=1, in_channels=3, dropout=0.0, blocks=Bottleneck):
+    return SpotTune(main='main50', in_channels=in_channels, num_classes=n_classes, dropout=dropout)
+
+def spottune101(n_classes=1, in_channels=3, dropout=0.0, blocks=Bottleneck):
+    return SpotTune(main='main101', in_channels=in_channels, num_classes=n_classes, dropout=dropout)
+
+def spottune152(n_classes=1, in_channels=3, dropout=0.0, blocks=Bottleneck):
+    return SpotTune(main='main152', in_channels=in_channels, num_classes=n_classes, dropout=dropout)
+
+def spottune200(n_classes=1, in_channels=3, dropout=0.0, blocks=Bottleneck):
+    return SpotTune(main='main200', in_channels=in_channels, num_classes=n_classes, dropout=dropout)
+
+
+def vit(n_classes=1, in_channels=3, dropout=0.0):
+    return ViT(
+        in_channels=in_channels,
+        img_size = (50,50,20),
+        patch_size = 16,
+        hidden_size = 768,
+        mlp_dim = 3072,
+        num_layers = 10,
+        num_heads = 12,
+        pos_embed = "conv",
+        classification = True,
+        num_classes = n_classes,
+        dropout_rate = dropout,
+        spatial_dims = 3,
+        )
 
 class LNCNN(nn.Module):
     def __init__(self, n_classes, in_channels, dropout):
@@ -66,7 +105,7 @@ class LNCNN(nn.Module):
 
         
         self.dropout = nn.Dropout(dropout)
-        self.dropout05 = nn.Dropout(0.05)
+        self.dropout05 = nn.Dropout(0.2)
         self.flatten = nn.Flatten()
         #self.avgpool = nn.AdaptiveAvgPool3d((1,1,1))
         #self.linear = nn.Linear(27104, n_classes)

@@ -228,6 +228,43 @@ class RunModel(object):
                 self.test_metrics[monitor].append(self.trainers[idx].test(self.model, datamodule=self.data_module_cross_val[idx], ckpt_path=best_model)[0])
 
 
+    def recover_nested_models(self):
+
+        idx_to_recover = []
+        max_idx = 0
+        max_nest = 0
+        for idx in range(5):
+            for nest in range(4):
+                if os.path.isdir(os.path.join(self.log_dir, f"top_models_fold_{idx}_nest_{nest}")):
+                    idx_to_recover.append((idx, nest))
+                    if idx > max_idx: 
+                        max_idx = idx
+                        max_nest = 0
+                    if nest > max_nest: max_nest = nest
+
+        print('restart training from last index:')
+        print(idx_to_recover[-1])
+
+        self.trainers = {}
+        self.test_nested_metrics = {}
+        self.val_nested_metrics = {}
+        self.callbacks(-1)
+        monitor_list = []
+
+        for callback in self.callbacks:
+            if 'ModelCheckpoint' in callback.__class__.__name__:
+                monitor_list.append(callback.monitor)
+                self.test_nested_metrics[callback.monitor] = {f"fold_{fold_idx}": {f"nest_{nest_idx}": [] for nest_idx in range(4)} for fold_idx in range(5)}
+                self.val_nested_metrics[callback.monitor] = {f"fold_{fold_idx}": {f"nest_{nest_idx}": [] for nest_idx in range(4)} for fold_idx in range(5)}
+    
+        self.best_checkpoints = {}
+        for idx in range(max_idx, 5):
+            self.best_checkpoints[f"fold_{idx}"] = []
+            self.trainers[f"fold_{idx}"] = []
+            for nest in range(4):
+                L.seed_everything(self.config['seed'])
+                
+
 
     def run_nested(self, resume=False, resume_fold_idx=-1, resume_nest_idx=-1):
 
@@ -404,10 +441,16 @@ class RunModel(object):
                 self.test_predictions_dict[monitor].append(torch.cat(trainer.predict(trainer.model, self.data_module_cross_val[idx].test_dataloader(), ckpt_path=best_model)))
                 self.val_predictions_dict[monitor].append(torch.cat(trainer.predict(trainer.model, self.data_module_cross_val[idx].val_dataloader(), ckpt_path=best_model)))
 
-            for batch in self.data_module_cross_val[idx].test_dataloader():
-                tmp_test_targets.append(batch.y)
-            for batch in self.data_module_cross_val[idx].val_dataloader():
-                tmp_val_targets.append(batch.y)
+            if self.config['include_primary']:
+                for batch in self.data_module_cross_val[idx].test_dataloader():
+                    tmp_test_targets.append(batch.y[np.squeeze(batch.patch_type)!='primary'])
+                for batch in self.data_module_cross_val[idx].val_dataloader():
+                    tmp_val_targets.append(batch.y[np.squeeze(batch.patch_type)!='primary'])
+            else:
+                for batch in self.data_module_cross_val[idx].test_dataloader():
+                    tmp_test_targets.append(batch.y)
+                for batch in self.data_module_cross_val[idx].val_dataloader():
+                    tmp_val_targets.append(batch.y)
 
             self.test_targets.append(torch.cat(tmp_test_targets))
             self.val_targets.append(torch.cat(tmp_val_targets))

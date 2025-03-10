@@ -4,7 +4,7 @@ from torch.nn import LeakyReLU, Dropout
 from torch_geometric.nn import ResGatedGraphConv, BatchNorm
 from torch_geometric.nn import DeepGCNLayer, GENConv, GraphUNet
 from torch_geometric.nn import global_mean_pool
-
+from torch_geometric.nn import GAT
 
 
 class EmptyNetwork(nn.Module):
@@ -86,7 +86,7 @@ class GATCN(nn.Module):
 
 
 class DeepGCN(nn.Module):
-    def __init__(self, in_channels, hidden_channels, num_layers, n_classes, edge_dim=1, dropout=0.5):
+    def __init__(self, in_channels, hidden_channels, n_classes, num_layers=28, edge_dim=1, dropout=0.5):
         super(DeepGCN, self).__init__()
 
         self.layers = nn.ModuleList()
@@ -135,5 +135,20 @@ class myGraphUNet(nn.Module):
         x = self.graphunet(x, edge_index, batch)
 
         #x = global_mean_pool(x, batch)
+
+        return x
+
+
+class myGAT(nn.Module):
+    def __init__(self, in_channels, hidden_channels, n_classes, edge_dim=3, dropout=0.5, num_layers=3):
+        super(myGAT, self).__init__()
+
+        self.gat = GAT(in_channels, hidden_channels, out_channels=hidden_channels, dropout=dropout, norm='BatchNorm', num_layers=3)
+
+        self.dropout = Dropout(dropout)
+
+
+    def forward(self, x, edge_index, batch, edge_attr=None):
+        x = self.gat(x, edge_index, batch)
 
         return x

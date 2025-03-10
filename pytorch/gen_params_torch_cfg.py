@@ -58,5 +58,7 @@ model_config = {
                                           'top_models_fold_3/model_epoch=80_val_loss=0.91_val_auc=0.96_val_m=0.91.ckpt',
                                           'top_models_fold_4/model_epoch=24_val_loss=0.77_val_auc=0.98_val_m=0.94.ckpt',
                                          ],
+               "radiomics_dir": 'Radiomics_features',
+               "use_radiomics": False,
                }         
 

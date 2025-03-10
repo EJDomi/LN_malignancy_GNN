@@ -66,12 +66,16 @@ class DatasetGeneratorImage(Dataset):
                 ratio_classes = int(floor(n_neg_avg / n_pos_avg)) - 1
             else:
                 ratio_classes = int(floor(n_neg_avg / n_pos_avg))
+            print(n_neg_avg, n_pos_avg)
+            print(ratio_classes)
             aug_pats = self.patients.copy(deep=True)
             for rot in range(ratio_classes):
                 if self.config['n_classes'] == 1:
                     aug_pos_pats = aug_pats.copy(deep=True)[aug_pats['labels']==1]
+                #elif self.config['n_classes'] == 2:
+                #    aug_pos_pats = aug_pats.copy(deep=True)[aug_pats['labels'].str[1]==1]
                 elif self.config['n_classes'] == 2:
-                    aug_pos_pats = aug_pats.copy(deep=True)[aug_pats['labels'].str[1]==1]
+                    aug_pos_pats = aug_pats.copy(deep=True).loc[(aug_pats.groupby('patients')['labels'].mean().str[1]>=1)[aug_pats.groupby('patients')['labels'].mean().str[1]>=1].index]
                 aug_pos_pats.index = aug_pos_pats.index.set_levels(aug_pos_pats.index.levels[aug_pos_pats.index.names.index('patients')] + f"_pos_rotation_{rot+1}", level='patients')
                 if rot == 0:
                     self.aug_pos_patients = aug_pos_pats
@@ -87,6 +91,32 @@ class DatasetGeneratorImage(Dataset):
             self.full_patients = pd.concat([self.full_patients, self.aug_patients])
         if self.config['balance_classes']:
             self.full_patients = pd.concat([self.full_patients, self.aug_pos_patients])
+
+        if self.config['use_radiomics']:
+            self.radiomics_data = None
+            print("extracting radiomics from mat files")
+            for idx in tqdm(list(range(5))):
+                rad_file = self.data_path.joinpath(self.config['radiomics_dir']).joinpath(f"Radio F{idx}_ct_fea.mat")
+   
+                rad_tmp = scipy.io.loadmat(rad_file.as_posix())['fin_fea_all']
+
+                rad_tmp[['patient_id', 'struct']] = rad_tmp['Unnamed: 0'].str.split('__', expand=True)
+                rad_tmp.drop(columns=['Unnamed: 0', 'Image', 'Mask'], inplace=True)
+                rad_tmp.set_index(['patient_id', 'struct'], inplace=True)
+                rad_tmp.drop(columns=[col for col in rad_tmp.columns if 'diagnostics' in col], inplace=True)
+
+                if idx == 0:
+                    self.radiomics_data = rad_tmp
+                else:
+                    self.radiomics_data = pd.concat([self.radiomics_data, rad_tmp])
+            if self.config['scale_radiomics']:
+                rad_mean = pd.read_pickle(self.config['radiomics_mean'])
+                rad_std = pd.read_pickle(self.config['radiomics_std'])
+
+                self.radiomics_data = (self.radiomics_data - rad_mean) / rad_std
+            print("done extracting radiomics")
+        else:
+            self.radiomics_data = None
         
                             
 
@@ -158,24 +188,37 @@ class DatasetGeneratorImage(Dataset):
                 primary = np.array(scipy.io.loadmat(self.data_path.joinpath(ct_path))['ct_int'])
                 primary_seg = np.array(scipy.io.loadmat(self.data_path.joinpath(primary_seg_path))['primary_seg_int'])
 
+
                 com = center_of_mass(primary_seg)
 
                 primary_patch = np.array(primary[max(int(com[0])-25, 0):int(com[0])+25,
                                   max(int(com[1])-25, 0):int(com[1])+25,
                                   max(int(com[2])-10, 0):int(com[2])+10])
-                padding = (50 - primary_patch.size()[0],
-                           50 - primary_patch.size()[1],
-                           20 - primary_patch.size()[2])
-                primary_patch = np.pad(primary_patch, pad_width((padding[0] // 2, padding[0]//2+padding[0]%2),
-                                                                (padding[1] // 2, padding[0]//2+padding[1]%2),
-                                                                (padding[2] // 2, padding[0]//2+padding[2]%2)),
+                primary_seg_patch = np.array(primary_seg[max(int(com[0])-25, 0):int(com[0])+25,
+                                  max(int(com[1])-25, 0):int(com[1])+25,
+                                  max(int(com[2])-10, 0):int(com[2])+10])
+                padding = (50 - primary_patch.shape[0],
+                           50 - primary_patch.shape[1],
+                           20 - primary_patch.shape[2])
+                primary_patch = np.pad(primary_patch, pad_width=((padding[0] // 2, padding[0]//2+padding[0]%2),
+                                                                (padding[1] // 2, padding[1]//2+padding[1]%2),
+                                                                (padding[2] // 2, padding[2]//2+padding[2]%2)),
+                                                        mode='constant', constant_values=0)
+                primary_seg_patch = np.pad(primary_seg_patch, pad_width=((padding[0] // 2, padding[0]//2+padding[0]%2),
+                                                                (padding[1] // 2, padding[1]//2+padding[1]%2),
+                                                                (padding[2] // 2, padding[2]//2+padding[2]%2)),
                                                         mode='constant', constant_values=0)
                
-                 
+                if to_rotate:
+                    primary_patch = self.apply_rotation(primary_patch, self.angle, self.rotate_axes)
+
+                graph_nx.add_node(0) 
                 graph_nx.nodes[0]['x'] = torch.tensor(np.expand_dims(primary_patch, 0), dtype=torch.float)
+                graph_nx.nodes[0]['y1'] = torch.tensor(np.expand_dims(primary_seg_patch, 0))
                 graph_nx.nodes[0]['y'] = torch.tensor([0,1], dtype=torch.long)
                 graph_nx.nodes[0]['pos'] = torch.tensor(com, dtype=torch.float)
                 graph_nx.nodes[0]['patch_type'] = 'primary'
+                graph_nx.nodes[0]['features'] = torch.tensor([0., group_df['pri_location'].mean(), group_df['pri_lat'].mean(), 0., 0.,], dtype=torch.float)
                 del primary_patch, primary, primary_seg
 
             for node in group_df.index:

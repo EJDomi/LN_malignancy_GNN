@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -21,7 +22,7 @@ class Classify(nn.Module):
 
     def forward(self, x, clinical=None):
         if clinical is not None:
-            x = torch.cat((x, clinical), 1)
+            x = torch.cat((x, clinical), -1)
             x = self.classify(x) 
         else:
             x = self.classify(x)
@@ -64,8 +65,8 @@ class CNN_GNN(L.LightningModule):
         self.test_spe_fn = torchmetrics.classification.BinarySpecificity()
         self.test_sen_fn = torchmetrics.classification.BinaryRecall()
 
-        for m in self.extractor.modules():
-            self.init_params(m)
+        #for m in self.extractor.modules():
+        #    self.init_params(m)
         for m in self.gnn.modules():
             self.init_params(m)
         for m in self.classify.modules():
@@ -149,17 +150,23 @@ class CNN_GNN(L.LightningModule):
         else:
             edge_attr = None
 
-        x = self.extractor(x)
+        if 'vit' in self.config['extractor_name']:
+            x = self.extractor(x)[0]
+            #x = self.avg_pool(x)
+        else:
+            x = self.extractor(x)
 
         if x.dim() == 1:
             x = x.squeeze().unsqueeze(0)
 
         x = self.gnn(x=x, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr) 
  
+      
         if self.config['include_primary']:
-            x = x[batch.patch_type != 'primary']
+            patch_type = np.squeeze(batch.patch_type)
+            x = x[patch_type != 'primary']
             if features is not None:
-                features = features[batch.patch_type != 'primary']
+                features = features[patch_type != 'primary']
 
         return self.classify(x, features)
         
@@ -186,7 +193,11 @@ class CNN_GNN(L.LightningModule):
             with torch.no_grad():
                 x = self.extractor(x)
         else:
-            x = self.extractor(x)
+            if 'vit' in self.config['extractor_name']:
+                x = self.extractor(x)[0]
+                #x = self.avg_pool(x)
+            else:
+                x = self.extractor(x)
         if self.config['edge_dim'] is not None:
             edge_attr = torch.nan_to_num(batch.edge_attr, nan=0.0)
         else:
@@ -198,20 +209,26 @@ class CNN_GNN(L.LightningModule):
         x = self.gnn(x=x, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr)  
        
         if self.config['include_primary']:
-            x = x[batch.patch_type != 'primary']
+            patch_type = np.squeeze(batch.patch_type)
+            x = x[patch_type != 'primary']
             if features is not None:
-                features = features[batch.patch_type != 'primary']
-            y = batch.y[batch.patch_type != 'primary']
+                features = features[patch_type != 'primary']
+            y = batch.y[patch_type != 'primary']
         else:
             y = batch.y
         pred = self.classify(x, features) 
 
+        if pred.dim() > 2:
+            pred = pred.squeeze()
+        if y.dim() > 2:
+            y = y.squeeze()
+
         loss = self.loss_fn(pred, y.to(torch.float))
 
-        self.auc_fn(pred, batch.y) 
-        self.ap_fn(pred, batch.y.to(torch.int64)) 
-        self.sen_fn(pred, batch.y) 
-        self.spe_fn(pred, batch.y) 
+        self.auc_fn(pred, y) 
+        self.ap_fn(pred, y.to(torch.int64)) 
+        self.sen_fn(pred, y) 
+        self.spe_fn(pred, y) 
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=len(batch.batch), prog_bar=True)
         self.log("train_auc", self.auc_fn, on_step=False, on_epoch=True, batch_size=len(batch.batch), prog_bar=True)
@@ -227,9 +244,15 @@ class CNN_GNN(L.LightningModule):
         pred = self._shared_eval_step(batch, batch_idx)
 
         if self.config['include_primary']:
-            y = batch.y[batch.patch_type != 'primary']
+            patch_type = np.squeeze(batch.patch_type)
+            y = batch.y[patch_type != 'primary']
         else:
             y = batch.y
+
+        if pred.dim() > 2:
+            pred = pred.squeeze()
+        if y.dim() > 2:
+            y = y.squeeze()
 
         val_loss = self.loss_fn(pred, y.to(torch.float))
 
@@ -252,9 +275,15 @@ class CNN_GNN(L.LightningModule):
         pred = self._shared_eval_step(batch, batch_idx)
 
         if self.config['include_primary']:
-            y = batch.y[batch.patch_type != 'primary']
+            patch_type = np.squeeze(batch.patch_type)
+            y = batch.y[patch_type != 'primary']
         else:
             y = batch.y
+
+        if pred.dim() > 2:
+            pred = pred.squeeze()
+        if y.dim() > 2:
+            y = y.squeeze()
 
         test_loss = self.loss_fn(pred, y.to(torch.float))
 
@@ -271,6 +300,10 @@ class CNN_GNN(L.LightningModule):
 
     def predict_step(self, batch, batch_idx):
         x = self._shared_eval_step(batch, batch_idx)
+
+        if x.dim() > 2:
+            x = x.squeeze()
+
         turn = nn.Sigmoid()
         pred = turn(x)
         return pred

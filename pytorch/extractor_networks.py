@@ -105,7 +105,7 @@ class LNCNN(nn.Module):
 
         
         self.dropout = nn.Dropout(dropout)
-        self.dropout05 = nn.Dropout(0.2)
+        self.dropout05 = nn.Dropout(0.05)
         self.flatten = nn.Flatten()
         #self.avgpool = nn.AdaptiveAvgPool3d((1,1,1))
         #self.linear = nn.Linear(27104, n_classes)
